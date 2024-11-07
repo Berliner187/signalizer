@@ -25,7 +25,7 @@ from database_manager import *
 from tracer import TracerManager, TRACER_FILE
 
 
-__version__ = '0.0.1'
+__version__ = '0.0.2'
 DEBUG = True
 
 
@@ -307,13 +307,12 @@ async def drop_admin_message(message: types.Message, sent_message):
 # Кнопки на админ-панели
 ADMIN_PANEL_BUTTONS = [
         [
-            types.KeyboardButton(text="/GROUPS/"),
+            types.KeyboardButton(text="/SYSTEM_CHECK/"),
             types.KeyboardButton(text="/COMMANDS/"),
             types.KeyboardButton(text="/ADMINS/")
         ],
         [
             types.KeyboardButton(text="/USERS/"),
-            types.KeyboardButton(text="/LESSONS/"),
             types.KeyboardButton(text="/PC/")
         ]
     ]
@@ -321,7 +320,7 @@ ADMIN_PANEL_BUTTONS = [
 
 @dp.message_handler(lambda message: message.text == 'signal')
 @dp.message_handler(lambda message: message.text == '/PANEL/')
-@dp.message_handler(commands=['inspira'])
+@dp.message_handler(commands=['signal'])
 async def admin_panel(message: types.Message):
     if message.from_user.id in administrators.get_list_of_admins():
         keyboard = types.ReplyKeyboardMarkup(keyboard=ADMIN_PANEL_BUTTONS, resize_keyboard=True)
@@ -330,7 +329,7 @@ async def admin_panel(message: types.Message):
             "<b>Панель администратора</b>\n\n"
             "<i>Здесь Вы можете:\n"
             "• Мониторить статус сервера\n"
-            "• Просматривать потребление системных ресурсов", reply_markup=keyboard, parse_mode='HTML')
+            "• Просматривать потребление системных ресурсов</i>", reply_markup=keyboard, parse_mode='HTML')
         tracer_l.tracer_charge(
             'ADMIN', message.from_user.id, admin_panel.__name__, "admin in control panel")
     else:
@@ -372,8 +371,9 @@ async def show_all_commands(message: types.Message):
 
         dict_commands = {
             "/signal": "панель администратора",
-            "/block <user_id>": "блокировка пользователя по ID",
-            "/sms <user_id>": "отправить пользователю сообщение",
+            "/system_info": "информация о ресурсах сервера",
+            "/block user_id": "блокировка пользователя по ID",
+            "/sms user_id": "отправить пользователю сообщение",
             "/limited_users": "просмотреть список заблокированных пользователей",
         }
 
@@ -446,7 +446,7 @@ async def send_message_to_telegram(message):
     await bot.send_message(superuser_id, message)
 
 
-LOAD_THRESHOLD = 2.0
+LOAD_THRESHOLD = 20.0
 
 
 async def check_server_availability():
@@ -462,7 +462,10 @@ async def check_server_availability():
         load_average = float(load_average)
 
         if load_average > LOAD_THRESHOLD:
-            await send_message_to_telegram(f'{WARNING_SYMBOL} HIGH SERVER LOAD!\n\nСредняя загрузка: {load_average}')
+            await send_message_to_telegram(
+                f'{WARNING_SYMBOL} HIGH SERVER LOAD!\n\n'
+                f'{get_format_date()}\n'
+                f'В среднем – {load_average}')
 
         stdin, stdout, stderr = client.exec_command('echo "Server is reachable"')
         output = stdout.read().decode().strip()
@@ -477,21 +480,37 @@ async def check_server_availability():
 
 @dp.message_handler(commands=['system_info'])
 async def cmd_system_info(message: types.Message):
-    await construction_to_delete_messages(message)
-    try:
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(server_host, username=server_username, password=server_password)
+    if message.from_user.id in administrators.get_list_of_admins():
+        try:
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(server_host, username=server_username, password=server_password)
 
-        stdin, stdout, stderr = client.exec_command('uname -a && free -h && df -h')
-        output = stdout.read().decode()
+            commands = [
+                'uname -a',
+                'uptime',
+                'free -h',
+                'df -h',
+                'ss -tuln'
+                'ping google.com',
+                'id',
+            ]
 
-        sent_message = await message.reply(f'Информация о системе:\n{output}')
-        await drop_admin_message(message, sent_message)
-    except Exception as e:
-        await message.reply(f'Ошибка: {str(e)}')
-    finally:
-        client.close()
+            output = ""
+            for command in commands:
+                stdin, stdout, stderr = client.exec_command(command)
+                output += f'Команда: {command}\n{stdout.read().decode()}\n{"-"*40}\n'
+
+            await send_long_message(message.chat.id, f'Информация о системе:\n{output}')
+        except Exception as e:
+            await send_long_message(message.chat.id, f'Ошибка: {str(e)}')
+        finally:
+            client.close()
+
+
+async def send_long_message(chat_id, text, max_length=1024):
+    for i in range(0, len(text), max_length):
+        await bot.send_message(chat_id, text[i:i + max_length])
 
 
 @dp.message_handler(commands=['add_admin'])
@@ -500,7 +519,7 @@ async def cmd_add_admin(message: types.Message):
         new_admin_id = message.text.split()[1]
         try:
             admin_man = AdminsManager(INSPIRA_DB)
-            admin_man.add_new_admin(new_admin_id)
+            admin_man.add_new_admin(new_admin_id, "0")
             await message.reply(f"Успешно {CONFIRM_SYMBOL}")
         except Exception as fail:
             await message.reply(f"Неудача {STOP_SYMBOL}\n\n{fail}")
