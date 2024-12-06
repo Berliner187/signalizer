@@ -6,6 +6,7 @@ import re
 import sys
 import importlib
 import locale
+import hashlib
 
 import asyncio
 from aiogram import Bot, Dispatcher, types
@@ -17,6 +18,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 import paramiko
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import requests
 
 
 from server_info import timing_decorator
@@ -25,7 +27,7 @@ from database_manager import *
 from tracer import TracerManager, TRACER_FILE
 
 
-__version__ = '0.0.2'
+__version__ = '0.1.0'
 DEBUG = True
 
 
@@ -46,10 +48,10 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 
 
 # ================ БАЗА ДАННЫХ И ТАБЛИЦЫ ================
-db_manager = DataBaseManager(INSPIRA_DB)
+db_manager = DataBaseManager(SIGN_DB)
 db_manager.create_table(USERS_TABLE_NAME, FIELDS_FOR_USERS)
 db_manager.create_table(PRODUCTS_TABLE_NAME, FIELDS_FOR_PRODUCTS)
-db_manager.create_table(REFERRALS_TABLE_NAME, FIELDS_FOR_REFERRALS)
+# db_manager.create_table(REFERRALS_TABLE_NAME, FIELDS_FOR_REFERRALS)
 db_manager.create_table(LIMITED_USERS_TABLE_NAME, FIELDS_FOR_LIMITED_USERS)
 db_manager.create_table(ADMINS_TABLE_NAME, FIELDS_FOR_ADMINS)
 
@@ -96,7 +98,7 @@ class Administrators(AdminsManager):
 
 
 # Инициализация администраторов
-administrators = Administrators(INSPIRA_DB)
+administrators = Administrators(SIGN_DB)
 
 
 @timing_decorator
@@ -171,7 +173,7 @@ async def check_user_data(message):
     first_name = message.chat.first_name
     last_name = message.chat.last_name
 
-    user_manager = UserManager(INSPIRA_DB)
+    user_manager = UserManager(SIGN_DB)
     result = user_manager.check_user_in_database(user_id)
 
     if not result:
@@ -204,8 +206,8 @@ async def start_message(message: types.Message):
             'INFO', message.from_user.id, start_message.__name__, "user launched bot")
 
         wait_message = await message.answer(
-            "<b>➔ SIGNALIZER ⚠️</b>\n"
-            "by Kozak Developer\n\n",
+            "<b>➔ ЛЕТУЧКА ⚠️</b>\n\n"
+            "Design by Kozak Developer\n\n",
             parse_mode='HTML'
         )
         await check_user_data(message)
@@ -214,33 +216,42 @@ async def start_message(message: types.Message):
 
         if len(check_for_ref) > 1:
             check_for_ref = check_for_ref[1]
-            ref_manager = ReferralArrival(INSPIRA_DB)
-            ref_manager.check_user_ref(message.from_user.id, check_for_ref)
-            print("ID ARRIVAL:", check_for_ref, message.from_user.id)
-
-        await asyncio.sleep(.5)
-
-        if message.from_user.id in administrators.get_list_of_admins():
-            kb = [
-                [
-                    types.KeyboardButton(text="/PANEL/"),
+            if check_for_ref[:2] == 'LE':
+                kb = [
+                    [
+                        'Подтвердить номер телефона'
+                    ]
                 ]
-            ]
-            tracer_l.tracer_charge(
-                'INFO', message.from_user.id, '/start', "display admin button")
+                keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+                await message.answer('Пожалуйста, подтвердите номер телефона', reply_markup=keyboard)
+                # ref_manager = ReferralArrival(SIGN_DB)
+                # ref_manager.check_user_ref(message.from_user.id, check_for_ref)
+                print("ID ARRIVAL:", check_for_ref, message.from_user.id)
         else:
-            kb = [
-                [
-                    types.KeyboardButton(text="Авторизация"),
+            await asyncio.sleep(.5)
+
+            if message.from_user.id in administrators.get_list_of_admins():
+                kb = [
+                    [
+                        types.KeyboardButton(text="/PANEL/"),
+                    ]
                 ]
-            ]
-            pass
+                tracer_l.tracer_charge(
+                    'INFO', message.from_user.id, '/start', "display admin button")
+            else:
+                kb = [
+                    [
+                        types.KeyboardButton(text="Авторизация"),
+                    ]
+                ]
+                pass
 
-        keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+            keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-        await message.answer(
-            'Летучка – Сервис для создания тестов при помощи ИИ\n\nhttp://letychka.ru',
-            reply_markup=keyboard)
+            await message.answer(
+                'Летучка – Сервис для создания тестов при помощи ИИ\n\nhttp://letychka.ru',
+                reply_markup=keyboard)
 
         # try:
         #     await bot.send_photo(
@@ -275,12 +286,82 @@ async def help_user(message: types.Message):
 # =============================================================================
 # --------------------------- НАВИГАЦИЯ ---------------------------------------
 # --------------------- ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ --------------------------------
-
-# -------- ФОРМА ЗАПИСИ НА ЗАНЯТИЕ --------
 @dp.message_handler(lambda message: message.text == 'Авторизация')
+@dp.message_handler(lambda message: message.text == 'Подтвердить номер телефона')
 @dp.message_handler(commands=['registration'])
-async def cmd_start(message: types.Message):
-    await message.answer("Доступ запрещен")
+async def get_contact_info(message: types.Message):
+    user_manager = UserManager(SIGN_DB)
+
+    user_phone_number = user_manager.get_phone(user_id=message.from_user.id)
+
+    if user_phone_number:
+        await message.answer("Номер уже зарегистрирован")
+    # else:
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    phone_button = types.KeyboardButton(text="📱 Отправить номер телефона", request_contact=True)
+    keyboard.add(phone_button)
+    tracer_l.tracer_charge(
+        'INFO', message.from_user.id, get_contact_info.__name__, "offer to send a contact")
+    await message.answer(
+        "Пожалуйста, отправьте свой номер телефона, чтобы подтвердить свой аккаунт 👇", reply_markup=keyboard)
+
+
+def hash_data(data):
+    data_string = json.dumps(data, sort_keys=True).encode()
+    return hashlib.sha256(data_string).hexdigest()
+
+
+@dp.message_handler(content_types=types.ContentType.CONTACT)
+async def contact_handler(message: types.Message):
+    user_id = message.from_user.id
+    phone = message.contact.phone_number
+
+    kb = [
+        [
+            types.KeyboardButton(text="Открыть в браузере")
+        ]
+    ]
+    keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+    try:
+        user_manager = UserManager(SIGN_DB)
+        user_manager.update_contact_info(user_id=user_id, phone=phone)
+
+        data = {
+            'telegram_user_id': user_id,
+            'phone_number': phone,
+            'username': message.from_user.username,
+            'first_name': message.from_user.first_name,
+            'last_name': message.from_user.last_name,
+        }
+
+        data_hash = hash_data(data)
+
+        response = requests.post('https://letychka.ru/api/v1/signal-secure/', json={
+            'data': data,
+            'data_hash': data_hash
+        })
+
+        print(response.status_code)
+        if response.status_code == 200:
+            tracer_l.tracer_charge(
+                'INFO', message.from_user.id, contact_handler.__name__, "send a conf data by API")
+            temp_mes = await message.answer("Запрос...")
+        else:
+            tracer_l.tracer_charge(
+                'ERROR', message.from_user.id, contact_handler.__name__, "send a conf data by API")
+            temp_mes = await message.answer("Ошибка при отправке данных.")
+
+        await message.answer(
+            f"Успешно! {CONFIRM_SYMBOL}\n\nТеперь Вы можете входить по своему номеру телефона",
+            reply_markup=keyboard)
+        await temp_mes.delete()
+
+    except Exception as db_error:
+        tracer_l.tracer_charge(
+            'CRITICAL', message.from_user.id, contact_handler.__name__,
+            "error saving the contact in database", f"{db_error}")
+        await message.answer(f"Ошибка :( {WARNING_SYMBOL}\n\nПопробуйте позже", reply_markup=keyboard)
 
 
 # ==========================================================================
@@ -342,7 +423,7 @@ async def show_all_admins(message: types.Message):
         await construction_to_delete_messages(message)
 
         users_id_of_admins = administrators.get_list_of_admins()
-        users_man = UserManager(INSPIRA_DB)
+        users_man = UserManager(SIGN_DB)
 
         markup = InlineKeyboardMarkup()
 
@@ -393,7 +474,7 @@ async def show_all_users(message: types.Message):
         wait_message = await message.answer("➜ LOADING DB... ///")
         await construction_to_delete_messages(message)
 
-        user_manager = UserManager(INSPIRA_DB)
+        user_manager = UserManager(SIGN_DB)
         all_users = user_manager.read_users_from_db()
 
         users_from_db = '➜ LAST USERS ➜\n\n'
@@ -446,7 +527,7 @@ async def send_message_to_telegram(message):
     await bot.send_message(superuser_id, message)
 
 
-LOAD_THRESHOLD = 20.0
+LOAD_THRESHOLD = 50.0
 
 
 async def check_server_availability():
@@ -518,7 +599,7 @@ async def cmd_add_admin(message: types.Message):
     if message.from_user.id == superuser_id:
         new_admin_id = message.text.split()[1]
         try:
-            admin_man = AdminsManager(INSPIRA_DB)
+            admin_man = AdminsManager(SIGN_DB)
             admin_man.add_new_admin(new_admin_id, "0")
             await message.reply(f"Успешно {CONFIRM_SYMBOL}")
         except Exception as fail:
@@ -531,14 +612,14 @@ async def cmd_add_admin(message: types.Message):
         selected_admin_id = int(message.text.split()[1])
 
         try:
-            admin_man = AdminsManager(INSPIRA_DB)
+            admin_man = AdminsManager(SIGN_DB)
             admin_man.drop_admin_from_db(selected_admin_id)
             await message.reply("[ OK ] ✅")
         except Exception:
             await message.reply("[ ERROR ] ❌")
 
 
-limited_users_manager = LimitedUsersManager(INSPIRA_DB)
+limited_users_manager = LimitedUsersManager(SIGN_DB)
 
 
 @dp.message_handler(commands=['limited_users'])
@@ -595,7 +676,7 @@ async def req_in_db(message: types.Message):
         await construction_to_delete_messages(message)
         _user_id = int(message.text.split()[1])
 
-        user_manager = UserManager(INSPIRA_DB)
+        user_manager = UserManager(SIGN_DB)
         _user_card = user_manager.get_user_card(_user_id, 'user')
 
         try:
@@ -624,7 +705,7 @@ async def req_in_db(message: types.Message):
         try:
             _user_id = int(message.text.split()[1])
 
-            user_manager = UserManager(INSPIRA_DB)
+            user_manager = UserManager(SIGN_DB)
 
             try:
                 user_manager.drop_user_from_db(_user_id)
@@ -673,7 +754,7 @@ async def sent_message_to_user(message: types.Message):
             _message = message.text.split()[1]
         _message = _message.replace("\\n", "\n")
 
-        user_manager = UserManager(INSPIRA_DB)
+        user_manager = UserManager(SIGN_DB)
         users_load = user_manager.read_users_from_db()
 
         cnt_users = 0

@@ -17,7 +17,7 @@ DEBUG = True
 tracer_l = TracerManager(TRACER_FILE)
 
 
-INSPIRA_DB = 'signalizer.db'
+SIGN_DB = 'signalizer.db'
 FILE_LIMITED_USERS = 'limited_users.db'
 
 USERS_TABLE_NAME = 'users'
@@ -499,7 +499,7 @@ class LimitedUsersManager(DataBaseManager):
             cursor = await _conn.execute(f"SELECT * FROM {LIMITED_USERS_TABLE_NAME}")
             records = await cursor.fetchall()
 
-            users_manager = UserManager(INSPIRA_DB)
+            users_manager = UserManager(SIGN_DB)
 
             response = '/// BLACKLIST ///\n\n'
             if records:
