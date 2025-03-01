@@ -7,6 +7,10 @@ import sys
 import importlib
 import locale
 import hashlib
+import hmac
+import time
+import secrets
+
 
 import asyncio
 from aiogram import Bot, Dispatcher, types
@@ -19,7 +23,10 @@ from aiogram.contrib.fsm_storage.memory import MemoryStorage
 import paramiko
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import requests
+import aiohttp
+from Crypto.PublicKey import ECC
 
+from quant import Quant
 
 from server_info import timing_decorator
 from database_manager import *
@@ -27,7 +34,7 @@ from database_manager import *
 from tracer import TracerManager, TRACER_FILE
 
 
-__version__ = '0.1.0'
+__version__ = '2.0.0'
 DEBUG = True
 
 
@@ -39,6 +46,7 @@ try:
     server_host = _config["server_host"]
     server_username = _config["server_username"]
     server_password = _config["server_password"]
+    SECRET_KEY = _config["secret_key"]
 except Exception as e:
     exhibit = None
     print("ОШИБКА при ЧТЕНИИ токена ТЕЛЕГРАМ", e)
@@ -194,6 +202,66 @@ async def check_user_data(message):
     return result
 
 
+@dp.callback_query_handler(lambda c: c.data == 'close_session')
+async def process_close_session(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id
+    await send_close_session_request(user_id)
+    await bot.answer_callback_query(callback_query.id, text="Запрос на закрытие сессии отправлен.")
+
+
+def generate_hash(user_id):
+    message = json.dumps({'user_id': user_id}).encode()
+    return hmac.new(SECRET_KEY.encode(), message, hashlib.sha256).hexdigest()
+
+
+async def send_close_session_request(user_id):
+    api_url = "https://letychka.ru/api/ghost_disconnect/"
+    gen_hash = generate_hash(user_id)
+    payload = {
+        'user_id': user_id,
+        'hash': gen_hash
+    }
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(api_url, json=payload) as response:
+                # Проверяем статус ответа
+                if response.status == 200:
+                    print('Post Terminate Session')
+                    tracer_l.tracer_charge(
+                        'INFO', user_id, send_close_session_request.__name__, 'Post Terminate Session')
+                else:
+                    print('Fail Terminate Session')
+                    print(response)
+                    try:
+                        response_data = await response.json()
+                    except aiohttp.ContentTypeError:
+                        response_data = await response.text()
+                    tracer_l.tracer_charge(
+                        'ERROR', user_id, send_close_session_request.__name__,
+                        'Fail in Terminate Session', response_data)
+        except Exception as e:
+            print(f'Exception occurred: {e}')
+            tracer_l.tracer_charge(
+                'ERROR', user_id, send_close_session_request.__name__,
+                'Exception in Terminate Session', str(e))
+
+
+def generate_auth_token(telegram_user_id: int) -> tuple:
+    """
+        Генерирует токен и хэш для одноразовой ссылки.
+        Возвращает (токен, хэш).
+    """
+    timestamp = str(int(time()))
+    random_part = secrets.token_hex(16)
+    token = f"{telegram_user_id}:{timestamp}:{random_part}"
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    return token, token_hash
+
+
+temp_messages = {}
+
+
 # ============================================================================
 # ------------------------- ПОЛЬЗОВАТЕЛЬСКИЕ КОМАНДЫ -------------------------
 @dp.message_handler(text='Запуск')
@@ -205,18 +273,18 @@ async def start_message(message: types.Message):
         tracer_l.tracer_charge(
             'INFO', message.from_user.id, start_message.__name__, "user launched bot")
 
-        wait_message = await message.answer(
-            "<b>➔ ЛЕТУЧКА ⚠️</b>\n\n"
-            "Design by Kozak Developer\n\n",
-            parse_mode='HTML'
-        )
-        await check_user_data(message)
+        if not await check_user_data(message):
+            wait_message = await message.answer(
+                "<b>➔ ЛЕТУЧКА ⚠️</b>\n\n"
+                "Design by Kozak Developer\n\n",
+                parse_mode='HTML'
+            )
 
         check_for_ref = message.text.split(' ')
 
         if len(check_for_ref) > 1:
             check_for_ref = check_for_ref[1]
-            if check_for_ref[:2] == 'LE':
+            if str(check_for_ref).startswith('login'):
                 kb = [
                     [
                         'Подтвердить номер телефона'
@@ -224,47 +292,66 @@ async def start_message(message: types.Message):
                 ]
                 keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-                await message.answer('Пожалуйста, подтвердите номер телефона', reply_markup=keyboard)
+                await message.answer(
+                    'Пожалуйста, подтвердите номер телефона, чтобы иметь возможность входить на платформу',
+                    reply_markup=keyboard)
                 # ref_manager = ReferralArrival(SIGN_DB)
                 # ref_manager.check_user_ref(message.from_user.id, check_for_ref)
                 print("ID ARRIVAL:", check_for_ref, message.from_user.id)
         else:
-            await asyncio.sleep(.5)
+            # keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-            if message.from_user.id in administrators.get_list_of_admins():
-                kb = [
-                    [
-                        types.KeyboardButton(text="/PANEL/"),
-                    ]
-                ]
+            # await message.answer(
+            #     'Летучка – Сервис для создания тестов при помощи ИИ\n\nhttp://letychka.ru',
+            #     reply_markup=keyboard)
+
+            user_id = message.from_user.id
+
+            try:
+                if not await check_user_data(message):
+                    await bot.send_photo(
+                        message.from_user.id,
+                        photo=InputFile('media/img/letychka-robot-start.png', filename='start_message.png'),
+                        parse_mode='HTML',
+                        caption=f'<b>Летучка – Создавайте тесты при помощи нейросети.</b>\n\n'
+                                f'Загружайте свои учебные материалы для создания персонализированных тестов!\n\n'
+                                f'<b>Преимущества:</b>\n'
+                                f'• Возможность загрузки файлов с материалами\n'
+                                f'• Проходить тесты можно сразу на платформе\n'
+                                f'• Персонализированная обратная связь от ИИ, с указанием на слабые и сильные стороны\n'
+                                f'• Возможность скачивать сгенерированные тесты в PDF\n\n'
+                                f'Карточка сервиса ☞ <a href="https://productradar.ru/product/letuchka/">Летучка</a>\n\n'
+                                f'<a href="https://t.me/LetychkaRobot">@LetychkaRobot</a>')
+
+                entry_url_mes = await bot.send_message(message.from_user.id, "Формируем ссылку для входа...")
+
+                token, token_hash = generate_auth_token(user_id)
+                auth_url = f"https://letychka.ru/api/v2/one_click_auth/{token}/{token_hash}/"
+
+                keyboard = types.InlineKeyboardMarkup()
+                button = types.InlineKeyboardButton(text="Открыть Летучку", url=f"{auth_url}")
+                keyboard.add(button)
+
+                await asyncio.sleep(.5)
+                await bot.send_message(
+                    message.from_user.id,
+                    "Нажмите на кнопку ниже, чтобы перейти на платформу.\n\n<i>Кнопка для входа действует 5 минут и действительна единожды</i>",
+                    reply_markup=keyboard, parse_mode='HTML')
+
                 tracer_l.tracer_charge(
-                    'INFO', message.from_user.id, '/start', "display admin button")
-            else:
-                kb = [
-                    [
-                        types.KeyboardButton(text="Авторизация"),
-                    ]
-                ]
-                pass
+                    'INFO', message.from_user.id, '/start', "user received start message")
 
-            keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+                await entry_url_mes.delete()
 
-            await message.answer(
-                'Летучка – Сервис для создания тестов при помощи ИИ\n\nhttp://letychka.ru',
-                reply_markup=keyboard)
-
-        # try:
-        #     await bot.send_photo(
-        #         message.from_user.id, photo=InputFile('media/img/menu.png', filename='start_message.png'),
-        #         reply_markup=keyboard, parse_mode='HTML',
-        #         caption=f'Привет! Здесь ты можешь узнать о готовности своего изделия')
-        #     tracer_l.tracer_charge(
-        #         'INFO', message.from_user.id, '/start', "user received start message")
-        # except Exception as error:
-        #     tracer_l.tracer_charge(
-        #         'ERROR', message.from_user.id, '/start',
-        #         "user failed received start message", f"{error}")
-        await wait_message.delete()
+            except Exception as error:
+                print("user failed received start message", f"{error}")
+                tracer_l.tracer_charge(
+                    'ERROR', message.from_user.id, '/start',
+                    "user failed received start message", f"{error}")
+        try:
+            await wait_message.delete()
+        except Exception as fail:
+            print('pass', fail)
 
 
 @dp.message_handler(commands=['help'])
@@ -316,14 +403,9 @@ async def contact_handler(message: types.Message):
     user_id = message.from_user.id
     phone = message.contact.phone_number
 
-    kb = [
-        [
-            types.KeyboardButton(text="Открыть в браузере")
-        ]
-    ]
-    keyboard = types.ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-
     try:
+        temp_mes = await message.answer("Обмениваемся секретами... 🤝🔑")
+
         user_manager = UserManager(SIGN_DB)
         user_manager.update_contact_info(user_id=user_id, phone=phone)
 
@@ -337,31 +419,82 @@ async def contact_handler(message: types.Message):
 
         data_hash = hash_data(data)
 
-        response = requests.post('https://letychka.ru/api/v1/signal-secure/', json={
-            'data': data,
-            'data_hash': data_hash
+        crypto = Quant()
+        crypto.generate_keys_with_secret()
+
+        public_key_pem = crypto.public_key.export_key(format='PEM')
+
+        exchange_response = requests.post(
+            'https://letychka.ru/api/v2/signal-secure/exchange_keys/',
+            json={
+                'public_key': public_key_pem,
+                'telegram_user_id': user_id
+            }
+        )
+
+        if exchange_response.status_code != 200:
+            print("exchange_response.status_code", exchange_response.status_code)
+            raise ValueError("Ошибка при обмене ключами")
+
+        server_public_key_pem = exchange_response.json().get("public_key")
+        if not server_public_key_pem:
+            raise ValueError("Не удалось получить публичный ключ сервера")
+
+        server_public_key = ECC.import_key(server_public_key_pem)
+
+        crypto.derive_shared_key(server_public_key)
+
+        data_bytes = json.dumps(data).encode('utf-8')
+
+        nonce, ciphertext, tag = crypto.encrypt_data(data_bytes)
+
+        response = requests.post('https://letychka.ru/api/v2/signal-secure/', json={
+            'nonce': nonce.hex(),
+            'ciphertext': ciphertext.hex(),
+            'tag': tag.hex(),
+            'data_hash': data_hash,
+            'telegram_user_id': user_id
         })
 
-        print(response.status_code)
-        if response.status_code == 200:
-            tracer_l.tracer_charge(
-                'INFO', message.from_user.id, contact_handler.__name__, "send a conf data by API")
-            temp_mes = await message.answer("Запрос...")
-        else:
-            tracer_l.tracer_charge(
-                'ERROR', message.from_user.id, contact_handler.__name__, "send a conf data by API")
-            temp_mes = await message.answer("Ошибка при отправке данных.")
+        await asyncio.sleep(.5)
+        await temp_mes.delete()
+        temp_mes = await message.answer("Момент... 🔐")
 
-        await message.answer(
-            f"Успешно! {CONFIRM_SYMBOL}\n\nТеперь Вы можете входить по своему номеру телефона",
-            reply_markup=keyboard)
+        user_id = message.from_user.id
+
+        token, token_hash = generate_auth_token(user_id)
+        auth_url = f"https://letychka.ru/api/v2/one_click_auth/{token}/{token_hash}/"
+
+        keyboard = types.InlineKeyboardMarkup()
+        button = types.InlineKeyboardButton(text="Открыть Летучку", url=f"{auth_url}")
+        keyboard.add(button)
+
+        if response.status_code == 200:
+            await asyncio.sleep(.5)
+            tracer_l.tracer_charge(
+                'INFO', user_id, contact_handler.__name__, "send a conf data by API")
+
+            await message.answer(
+                f"<b>Готово!</b> 🎉\n\nМожете входить по своему номеру телефона!\n\n<i>Перейдите по ссылке ниже, чтобы войти</i>",
+                reply_markup=keyboard, parse_mode='HTML')
+        else:
+            try:
+                error_data = response.json()
+                error_message = error_data.get('message', 'Неизвестная ошибка')
+            except json.JSONDecodeError:
+                error_message = response.text
+
+            tracer_l.tracer_charge(
+                'ERROR', user_id, contact_handler.__name__, f"send a conf data by API: {error_message}")
+
+            await message.answer(f"Ошибка: {error_message}")
         await temp_mes.delete()
 
-    except Exception as db_error:
+    except Exception as e:
+        print(f"Error: {e}")
         tracer_l.tracer_charge(
-            'CRITICAL', message.from_user.id, contact_handler.__name__,
-            "error saving the contact in database", f"{db_error}")
-        await message.answer(f"Ошибка :( {WARNING_SYMBOL}\n\nПопробуйте позже", reply_markup=keyboard)
+            'ERROR', user_id, contact_handler.__name__, f"Error: {str(e)}")
+        await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
 
 
 # ==========================================================================
@@ -860,7 +993,7 @@ async def on_startup(dp):
     """
     )
     print(f'===== DEBUG: {DEBUG} =============================================')
-    print(f'===== INSPIRA: {__version__}  =======================================')
+    print(f'===== SIGNAL: {__version__}  =======================================')
     # await general_coroutine()
     tracer_l.tracer_charge(
         "SYSTEM", 0, on_startup.__name__, "start the server")
@@ -871,12 +1004,5 @@ async def on_startup(dp):
 
 
 if __name__ == '__main__':
-    try:
-        dp.register_message_handler(admin_panel, commands=["signal"])
-        executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
-
-    except Exception as critical:
-        tracer_l.tracer_charge(
-            "CRITICAL", 0, "Exception",
-            f"emergency reboot the server", str(critical))
-        ServerManager().emergency_reboot()
+    dp.register_message_handler(admin_panel, commands=["signal"])
+    executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
